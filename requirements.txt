@@ -1,0 +1,8 @@
+# Core
+PyYAML>=6.0
+# YARA rule matching (optional heuristic layer)
+yara-python>=4.3.0
+# Progress + nicer CLI
+rich>=13.0
+# NOTE: USB drive detection uses the Win32 API via ctypes (stdlib) — no
+# pywin32/WMI dependency, so the frozen exe stays small and portable.

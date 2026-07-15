@@ -1,0 +1,77 @@
+# USB Virus Scanner — company configuration
+# Edit paths to match your deployment. All paths support Windows (C:\...) and POSIX.
+
+scanner:
+  # Path to ClamAV's clamscan.exe (or clamdscan.exe for daemon mode).
+  # Default assumes the standard Windows installer location.
+  clamscan_path: "C:\\Program Files\\ClamAV\\clamscan.exe"
+  clamdscan_path: "C:\\Program Files\\ClamAV\\clamdscan.exe"
+  # Prefer the resident daemon (clamd) when available — 10-100x faster on repeated scans.
+  prefer_daemon: true
+  # Max file size to scan (MB). Larger files are skipped (logged).
+  max_file_size_mb: 200
+  # Follow into archives (zip/rar/7z). ClamAV handles decompression.
+  # Turning this OFF is a big speed win on slow laptops (skips unpacking).
+  scan_archives: true
+  # Worker threads for the heuristic layer. "auto" = scale to CPU cores
+  # (kept modest so single-disk laptops don't thrash). Or set an integer.
+  workers: auto
+  # Skip files already scanned clean and unchanged since last scan.
+  # Massive speed-up when re-scanning the same USB / company hard disk.
+  use_cache: true
+  # clamdscan --multiscan: use all daemon threads in parallel (multi-core win).
+  multiscan: true
+
+heuristics:
+  enabled: true
+  # Flag autorun.inf on removable media — classic USB-worm propagation vector.
+  flag_autorun_inf: true
+  # Extensions treated as high-risk on removable media.
+  suspicious_extensions:
+    - ".exe"
+    - ".scr"
+    - ".bat"
+    - ".cmd"
+    - ".vbs"
+    - ".vbe"
+    - ".js"
+    - ".jse"
+    - ".ps1"
+    - ".lnk"
+    - ".pif"
+    - ".com"
+    - ".hta"
+    - ".jar"
+  # Flag double extensions like invoice.pdf.exe
+  flag_double_extension: true
+  # SHA-256 hash blocklist file (one hash per line, optional "  # comment").
+  hash_blocklist: "signatures/hash_blocklist.txt"
+  # Directory of YARA rule files (*.yar / *.yara). Empty = disabled.
+  yara_rules_dir: "signatures/yara"
+  # Fast mode: only read+hash+YARA files that are a risky type OR small.
+  # false = fast (recommended for slow laptops). true = hash/YARA every file.
+  deep_scan_all: false
+  # In fast mode, non-risky files larger than this are not deep-scanned (MB).
+  deep_scan_max_mb: 50
+
+quarantine:
+  # Where infected files are moved (kept off the removable drive).
+  path: "C:\\ProgramData\\USBVirusScanner\\Quarantine"
+  # XOR-obfuscate quarantined files so they can't be executed accidentally.
+  # NOTE: this neutralizes accidental execution; it is not cryptographic security.
+  neutralize: true
+
+logging:
+  path: "C:\\ProgramData\\USBVirusScanner\\Logs"
+  level: "INFO"
+  # Also emit machine-readable JSONL for SIEM ingestion.
+  jsonl: true
+
+reporting:
+  path: "C:\\ProgramData\\USBVirusScanner\\Reports"
+
+watcher:
+  # Auto-scan any removable drive the moment it is inserted.
+  auto_scan_on_insert: true
+  # Poll interval (seconds) for the fallback drive-letter watcher.
+  poll_interval: 3

@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.DS_Store
+.claude/
+# runtime data dirs if run from source
+logs/
+reports/
+quarantine/
+build/build/
+dist/
+Output/
+*.spec.bak
+# frozen-build temp
+/build/*.toc
