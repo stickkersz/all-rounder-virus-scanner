@@ -4,6 +4,10 @@ Company-wide malware scanner for **USB drives and hard disks on Windows**.
 Auto-scans any removable drive the moment it is plugged in, quarantines
 infected files off the drive, and writes audit logs + reports for IT.
 
+> 📖 **New here? Read the [step-by-step Installation & User Guide (GUIDE.md)](GUIDE.md)** —
+> plain-language install steps and a tutorial for scanning, quarantine, and more.
+> This README is the technical reference.
+
 ## Detection layers
 
 | Layer | What it catches | Engine |
