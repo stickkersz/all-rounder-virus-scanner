@@ -11,7 +11,10 @@
 ; Produces:  Output\USBVirusScannerSetup.exe  - one file to hand to employees.
 
 #define AppName    "USB Virus Scanner"
-#define AppVersion "1.0.0"
+; Version can be overridden at build time:  iscc /DAppVersion=1.1.0 ...
+#ifndef AppVersion
+  #define AppVersion "1.0.0"
+#endif
 #define AppExe     "USBVirusScanner.exe"
 #define Publisher  "Company IT Security"
 
@@ -19,8 +22,13 @@
 #define ClamBundled FileExists(SourcePath + "..\vendor\ClamAV\clamscan.exe")
 
 [Setup]
+; Stable AppId -> Windows recognizes new builds as UPGRADES of the same product
+; (replaces files in place, keeps one Add/Remove Programs entry). Never change it.
+AppId={{6AEB4019-0F4C-4792-B68C-9A3BF2D5F2F1}
 AppName={#AppName}
 AppVersion={#AppVersion}
+AppVerName={#AppName} {#AppVersion}
+VersionInfoVersion={#AppVersion}
 AppPublisher={#Publisher}
 DefaultDirName={autopf}\USBVirusScanner
 DefaultGroupName={#AppName}

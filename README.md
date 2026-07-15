@@ -291,6 +291,39 @@ regenerate it with `python build\make_icon.py` (needs Pillow). Build artifacts
   as incidents happen.
 - Keep signatures fresh: schedule `usbscan update` (or `freshclam`).
 
+## Updating an already-installed deployment
+
+There are two independent kinds of update.
+
+**1. Virus signatures — automatic.** The installer registers a daily scheduled
+task (`USBVirusScannerUpdate`, noon) that refreshes the ClamAV database, so
+detection tracks new variants with no action. Force one anytime:
+
+```powershell
+"C:\Program Files\USBVirusScanner\usbscan.exe" update
+```
+
+**2. The program itself (new code / features) — rebuild + reinstall.** Ship a
+new `setup.exe`; it upgrades in place (the installer has a fixed `AppId`, so
+Windows treats each new build as an upgrade of the same product — one entry in
+Add/Remove Programs, files replaced).
+
+```powershell
+# on the build machine:
+cd usb-virus-scanner
+git pull                                                          # get new code
+powershell -ExecutionPolicy Bypass -File build\build.ps1 -Offline -Version 1.1.0
+
+# on each PC (or via GPO/Intune/SCCM):
+USBVirusScannerSetup.exe /VERYSILENT /NORESTART
+```
+
+`-Version` stamps both the app (`usbscan version`) and the installer, so the
+version shows correctly in Add/Remove Programs. Omit it to keep the current
+version number. **Preserved across an upgrade:** the user's `config.yaml`, the
+Quarantine folder, and the scheduled tasks (re-created). Uninstalling still
+keeps Quarantine so contained malware isn't released.
+
 ---
 
 # Configuration & tuning

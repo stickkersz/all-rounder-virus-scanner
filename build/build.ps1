@@ -16,7 +16,8 @@
 #>
 
 param(
-    [switch]$Offline = $false
+    [switch]$Offline = $false,
+    [string]$Version = ""      # e.g. -Version 1.1.0 ; default = keep current
 )
 
 $ErrorActionPreference = "Stop"
@@ -24,6 +25,21 @@ $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $Root
 
 Write-Host "== Building USB Virus Scanner installer ==" -ForegroundColor Cyan
+
+# Version handling: -Version stamps both the app (scanner\__init__.py) and the
+# installer so `usbscan version` and Add/Remove Programs stay in sync. If not
+# given, reuse whatever __version__ the source already has.
+$initFile = "scanner\__init__.py"
+if ($Version) {
+    (Get-Content $initFile) `
+        -replace '__version__\s*=\s*".*"', "__version__ = ""$Version""" |
+        Set-Content $initFile
+    Write-Host "  Version stamped: $Version" -ForegroundColor Green
+} else {
+    $m = Select-String -Path $initFile -Pattern '__version__\s*=\s*"([^"]+)"'
+    $Version = if ($m) { $m.Matches[0].Groups[1].Value } else { "1.0.0" }
+    Write-Host "  Version: $Version (unchanged)" -ForegroundColor Green
+}
 
 # 0. Offline bundle: fetch ClamAV + virus DB into vendor\ if asked / missing.
 $clamStaged = Test-Path "vendor\ClamAV\clamscan.exe"
@@ -67,8 +83,8 @@ if (-not $iscc) {
     }
 }
 if ($iscc) {
-    & $iscc "build\installer.iss"
-    Write-Host "`nDONE. Installer: Output\USBVirusScannerSetup.exe" -ForegroundColor Green
+    & $iscc "/DAppVersion=$Version" "build\installer.iss"
+    Write-Host "`nDONE. Installer (v$Version): Output\USBVirusScannerSetup.exe" -ForegroundColor Green
     Write-Host "Hand that ONE file to employees  -  double-click, Next, done." -ForegroundColor Green
 } else {
     Write-Warning "Inno Setup (iscc) not found. Install it from https://jrsoftware.org/isdl.php"
