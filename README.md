@@ -300,36 +300,50 @@ regenerate it with `python build\make_icon.py` (needs Pillow). Build artifacts
 
 ## Updating an already-installed deployment
 
-There are two independent kinds of update.
+There are **two completely separate kinds of update**. Know which one you need:
 
-**1. Virus signatures — automatic.** The installer registers a daily scheduled
-task (`USBVirusScannerUpdate`, noon) that refreshes the ClamAV database, so
-detection tracks new variants with no action. Force one anytime:
+| You want... | Use | Gets new features? | Gets newer virus definitions? |
+|-------------|-----|:---:|:---:|
+| Latest **virus definitions** | `usbscan update` | ❌ | ✅ |
+| New **program features / fixes** (e.g. the delete button, GUI changes) | rebuild + reinstall `setup.exe` | ✅ | ✅ |
+
+> **Key point:** `usbscan update` only refreshes the virus database — it does
+> **not** add program features. New features live inside the `.exe`, so they
+> only arrive by installing a newly-built `setup.exe`.
+
+### A) Update virus definitions (fast, no rebuild)
+
+Already automatic — the installer registers a daily task
+(`USBVirusScannerUpdate`, noon) that refreshes the ClamAV database. To force one
+now:
 
 ```powershell
 "C:\Program Files\USBVirusScanner\usbscan.exe" update
 ```
 
-**2. The program itself (new code / features) — rebuild + reinstall.** Ship a
-new `setup.exe`; it upgrades in place (the installer has a fixed `AppId`, so
-Windows treats each new build as an upgrade of the same product — one entry in
-Add/Remove Programs, files replaced).
+### B) Update the program to a new version (new features / fixes)
+
+You must build a fresh `setup.exe` and run it. It upgrades in place — the
+installer has a fixed `AppId`, so Windows replaces the old files and keeps a
+single Add/Remove Programs entry.
 
 ```powershell
-# on the build machine:
+# 1) On the BUILD machine — get the new code and build a new installer:
 cd usb-virus-scanner
-git pull                                                          # get new code
+git pull
 powershell -ExecutionPolicy Bypass -File build\build.ps1 -Offline -Version 1.1.0
 
-# on each PC (or via GPO/Intune/SCCM):
+# 2) On EACH PC (or push via GPO / Intune / SCCM) — run the new installer:
 USBVirusScannerSetup.exe /VERYSILENT /NORESTART
 ```
 
-`-Version` stamps both the app (`usbscan version`) and the installer, so the
-version shows correctly in Add/Remove Programs. Omit it to keep the current
-version number. **Preserved across an upgrade:** the user's `config.yaml`, the
-Quarantine folder, and the scheduled tasks (re-created). Uninstalling still
-keeps Quarantine so contained malware isn't released.
+Bump `-Version` each release (e.g. `1.1.0`, `1.2.0`) so the number shows
+correctly in `usbscan version` and Add/Remove Programs. Omit it to keep the
+current number.
+
+**Kept safe across an upgrade:** the user's `config.yaml`, the Quarantine
+folder, and the scheduled tasks (re-created). Uninstalling also keeps
+Quarantine, so contained malware is never released back onto disk.
 
 ---
 

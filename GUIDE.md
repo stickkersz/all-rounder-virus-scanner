@@ -174,6 +174,40 @@ usbscan update
 
 IT can schedule this (e.g. a daily task) so every PC stays current.
 
+### 5b. Two kinds of "update" — don't mix them up
+
+This trips people up, so here it is plainly:
+
+| If you want... | Do this | Rebuild needed? |
+|----------------|---------|:---:|
+| **Newer virus definitions** (catch the latest malware) | `usbscan update` | No |
+| **New program features** (e.g. the new Delete button, a bug fix) | build a new `setup.exe` and reinstall it | **Yes** |
+
+**Plain-English rule:**
+
+- `usbscan update` = **new virus definitions only.** It does **not** add
+  buttons or features. (And it already runs automatically every day.)
+- **New features live inside the program file (`.exe`).** The only way to get
+  them onto a computer is to install a freshly-built `setup.exe`.
+
+**So: to get a new feature like the Delete button, you must rebuild + reinstall.**
+`usbscan update` will not bring it.
+
+**How to update the program (for whoever builds it):**
+
+```powershell
+# 1) On the build computer - get the new code and build a new installer:
+cd usb-virus-scanner
+git pull
+powershell -ExecutionPolicy Bypass -File build\build.ps1 -Offline -Version 1.1.0
+
+# 2) On each PC - run the new installer (upgrades in place, keeps your data):
+USBVirusScannerSetup.exe /VERYSILENT /NORESTART
+```
+
+Your `config.yaml`, the Quarantine folder, and the scheduled tasks all survive
+the upgrade.
+
 ### 6. Where the results are saved
 
 Everything is logged under `C:\ProgramData\USBVirusScanner\`:
