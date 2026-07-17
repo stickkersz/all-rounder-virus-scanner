@@ -17,10 +17,22 @@ from typing import Optional
 _NEUTRALIZE_KEY = 0x5A
 
 
+# XOR-with-a-fixed-key is a pure byte substitution, so a precomputed 256-entry
+# translation table lets bytes.translate() do the whole block in C. The old
+# per-byte generator (`bytes(b ^ key for b in block)`) ran a Python-level loop
+# over every byte — painfully slow quarantining a large file on a weak CPU.
+def _xor_table(key: int) -> bytes:
+    return bytes(b ^ key for b in range(256))
+
+
+_XOR_TABLE = _xor_table(_NEUTRALIZE_KEY)
+
+
 def _xor_file(src: str, dst: str, key: int = _NEUTRALIZE_KEY) -> None:
+    table = _XOR_TABLE if key == _NEUTRALIZE_KEY else _xor_table(key)
     with open(src, "rb") as fin, open(dst, "wb") as fout:
         for block in iter(lambda: fin.read(1 << 20), b""):
-            fout.write(bytes(b ^ key for b in block))
+            fout.write(block.translate(table))
 
 
 class Quarantine:

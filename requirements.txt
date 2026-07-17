@@ -4,5 +4,8 @@ PyYAML>=6.0
 yara-python>=4.3.0
 # Progress + nicer CLI
 rich>=13.0
+# Real-time file monitoring (usbscan monitor). Optional at runtime: the
+# scanner degrades gracefully without it, only `monitor` refuses to start.
+watchdog>=4.0
 # NOTE: USB drive detection uses the Win32 API via ctypes (stdlib) — no
 # pywin32/WMI dependency, so the frozen exe stays small and portable.

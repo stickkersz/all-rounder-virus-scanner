@@ -12,9 +12,12 @@ import math
 import os
 import subprocess
 import sys
+import threading
 from typing import List, Optional, Set
 
+from .detectors import Category, FileContext, build_static_detectors
 from .models import Detection, Severity
+from .perf import resolve_memory_cap, system_memory
 
 try:
     import yara  # type: ignore
@@ -80,23 +83,51 @@ def head_sample(path: str, n: int = _ENTROPY_SAMPLE_BYTES) -> Optional[bytes]:
         return None
 
 
+# Memoize Authenticode verdicts. Each check spawns a PowerShell process (~100s
+# of ms + memory); a Full scan can hit many packed signed installers, and the
+# real-time monitor re-checks the same tools repeatedly. Keyed by
+# (path, mtime_ns, size) so a modified file is always re-verified. Bounded so a
+# weeks-long monitor can't leak. Guarded by a lock: worker threads call in
+# parallel and a plain dict would race.
+_AUTHENTICODE_CACHE: dict = {}
+_AUTHENTICODE_CACHE_MAX = 2048
+_AUTHENTICODE_LOCK = threading.Lock()
+
+
 def authenticode_valid(path: str) -> bool:
     """True if `path` carries a VALID Authenticode signature from a trusted
     publisher (Windows only). This is the OS's own 'known-good' signal - the
     best way to avoid flagging legit signed software (packed installers etc.)
     without maintaining a giant hash list. No-op / False off Windows.
+
+    Memoized on (path, mtime, size): the underlying PowerShell spawn is far too
+    expensive to repeat per scan / per monitor batch on a low-end machine.
     """
     if sys.platform != "win32":
         return False
+    try:
+        st = os.stat(path)
+        key = (path, st.st_mtime_ns, st.st_size)
+    except OSError:
+        return False
+    with _AUTHENTICODE_LOCK:
+        cached = _AUTHENTICODE_CACHE.get(key)
+    if cached is not None:
+        return cached
     try:
         lit = path.replace("'", "''")             # escape for PowerShell literal
         proc = subprocess.run(
             ["powershell", "-NoProfile", "-NonInteractive", "-Command",
              f"(Get-AuthenticodeSignature -LiteralPath '{lit}').Status"],
             capture_output=True, text=True, timeout=20)
-        return proc.stdout.strip() == "Valid"
+        valid = proc.stdout.strip() == "Valid"
     except Exception:
         return False
+    with _AUTHENTICODE_LOCK:
+        if len(_AUTHENTICODE_CACHE) >= _AUTHENTICODE_CACHE_MAX:
+            _AUTHENTICODE_CACHE.clear()
+        _AUTHENTICODE_CACHE[key] = valid
+    return valid
 
 
 def sha256_of(path: str, chunk: int = 1 << 20) -> Optional[str]:
@@ -131,6 +162,11 @@ class HeuristicEngine:
         # files that are extremely unlikely to be executable malware.
         self.deep_scan_all = cfg.get("deep_scan_all", False)
         self.deep_scan_max_bytes = int(cfg.get("deep_scan_max_mb", 50)) * 1024 * 1024
+        # Per-file in-memory read cap, shrunk on low-RAM machines. Larger files
+        # stream instead of buffering; lowering this only trades a little speed
+        # for much lower peak memory, never drops a file from the scan.
+        total_mem, _avail = system_memory()
+        self.in_memory_cap = resolve_memory_cap(_IN_MEMORY_CAP, total_mem)
         self._hashes: Set[str] = self._load_hashes(cfg.get("hash_blocklist"))
         self._yara_rules = self._load_yara(cfg.get("yara_rules_dir"))
         # False-positive reducers: never hide a real ClamAV/blocklist/YARA hit,
@@ -141,14 +177,29 @@ class HeuristicEngine:
         #     noisy packed/entropy heuristic on legit signed software.
         self.trust_signed = cfg.get("trust_signed", True)
         # (c) trusted directory prefixes -> suppress the entropy heuristic there.
-        self.trusted_paths = [os.path.normcase(p)
-                              for p in cfg.get("trusted_paths", [])]
+        #     Normalized (abspath + case-fold, no trailing sep) so a boundary
+        #     match is exact: a rule for C:\Windows must NOT trust
+        #     C:\Windows-evil\payload.exe.
+        self.trusted_paths = [
+            os.path.normcase(os.path.abspath(p)).rstrip(os.sep)
+            for p in cfg.get("trusted_paths", []) if p]
+        # Category-aware static detectors (trojan, infector, PUP, fileless-lite,
+        # rootkit-at-rest). Each is toggled/tuned via heuristics.detectors.<key>.
+        # Built once; run per file in scan_file over a shared FileContext.
+        self.static_detectors = build_static_detectors(cfg)
 
     # ---- loading -------------------------------------------------------
     def _resolve(self, rel: Optional[str]) -> Optional[str]:
         if not rel:
             return None
         return rel if os.path.isabs(rel) else os.path.join(self.base_dir, rel)
+
+    def add_hash_blocklist(self, path: str) -> int:
+        """Merge another hash blocklist file (feed-synced) into the hash
+        layer. Returns how many hashes were added."""
+        extra = self._load_hashes(path)
+        self._hashes |= extra
+        return len(extra)
 
     def _load_hashes(self, rel: Optional[str]) -> Set[str]:
         path = self._resolve(rel)
@@ -227,68 +278,103 @@ class HeuristicEngine:
                 out.append(Detection(path, Severity.SUSPICIOUS,
                                      "possible ransom note", "heuristic"))
 
-        # Deep layers need the file bytes -- the expensive part. Skip on big
-        # non-risky files so slow disks aren't hammered reading movies/backups.
+        # Deep layers need the file bytes -- the expensive part. Skip the READ
+        # on big non-risky files so slow disks aren't hammered reading
+        # movies/backups. The name-based category detectors below still run
+        # (they cost an extension check, no I/O), so a disguised `svchost.exe`
+        # is caught whether or not we deep-read it.
         wants_deep = (self._hashes or self._allow or self._yara_rules
                       or self.flag_packed_exe)
-        if not (wants_deep and self._needs_deep_scan(ext, size)):
-            return out
-
-        # Read the file ONCE and feed all deep checks (hash, YARA, entropy) from
-        # the same buffer -- avoids re-reading the file 2-3x on slow disks.
-        # Files above the in-memory cap fall back to streaming so we never OOM.
-        need_hash = bool(self._hashes or self._allow)
-        digest = None
+        head = None
         buf = None
-        if size and size <= _IN_MEMORY_CAP:
-            buf = head_sample(path, size)          # whole small file, one read
-        if buf is not None:
-            digest = hashlib.sha256(buf).hexdigest() if need_hash else None
-            yara_target = {"data": buf}
-            head = buf[:_ENTROPY_SAMPLE_BYTES]
-        else:                                       # large file: stream, don't buffer
-            digest = sha256_of(path) if need_hash else None
-            yara_target = {"filepath": path}
-            head = head_sample(path)
+        digest = None
+        if wants_deep and self._needs_deep_scan(ext, size):
+            # Read the file ONCE and feed all deep checks (hash, YARA, entropy)
+            # from the same buffer. Above the in-memory cap we stream instead.
+            need_hash = bool(self._hashes or self._allow)
+            if size and size <= self.in_memory_cap:
+                buf = head_sample(path, size)      # whole small file, one read
+            if buf is not None:
+                digest = hashlib.sha256(buf).hexdigest() if need_hash else None
+                yara_target = {"data": buf}
+                head = buf[:_ENTROPY_SAMPLE_BYTES]
+            else:                                   # large file: stream, no buffer
+                digest = sha256_of(path) if need_hash else None
+                yara_target = {"filepath": path}
+                head = head_sample(path)
 
-        # Explicit known-bad ALWAYS wins -- even over allowlist/signature.
-        if digest and digest in self._hashes:
-            out.append(Detection(path, Severity.INFECTED,
-                                 "matched company hash blocklist",
-                                 "hash", sha256=digest))
-            return out
+            # Explicit known-bad ALWAYS wins -- even over allowlist/signature.
+            if digest and digest in self._hashes:
+                out.append(Detection(path, Severity.INFECTED,
+                                     "matched company hash blocklist",
+                                     "hash", sha256=digest,
+                                     category=Category.GENERIC.value))
+                return out
 
-        # Exact known-good hash -> fully trust this file; skip the FP-prone
-        # YARA + entropy layers (but a blocklist/ClamAV hit above still stands).
-        exact_trusted = bool(digest and digest in self._allow)
+            # Exact known-good hash -> fully trust; skip the FP-prone YARA +
+            # entropy layers (a blocklist/ClamAV hit above still stands).
+            exact_trusted = bool(digest and digest in self._allow)
 
-        if self._yara_rules is not None and not exact_trusted:
-            try:
-                for m in self._yara_rules.match(**yara_target):
-                    out.append(Detection(path, Severity.INFECTED,
-                                         f"YARA:{m.rule}", "yara", sha256=digest))
-            except Exception:
-                pass
+            if self._yara_rules is not None and not exact_trusted:
+                try:
+                    for m in self._yara_rules.match(**yara_target):
+                        out.append(Detection(path, Severity.INFECTED,
+                                             f"YARA:{m.rule}", "yara",
+                                             sha256=digest,
+                                             category=Category.GENERIC.value))
+                except Exception:
+                    pass
 
-        # Packed/obfuscated executable: high entropy in a PE (MZ) file. Catches
-        # fresh trojan variants that no signature covers yet -- but legit signed
-        # installers are ALSO packed, so trusted files are exempted to cut false
-        # positives. The signature check is lazy: only runs once entropy is high.
-        if self.flag_packed_exe and head and head[:2] == b"MZ" and \
-                shannon_entropy(head) >= PACKED_ENTROPY_THRESHOLD:
-            if not (exact_trusted or self._is_soft_trusted(path)):
-                out.append(Detection(path, Severity.SUSPICIOUS,
-                                     "packed/high-entropy executable "
-                                     "(possible obfuscated malware)", "heuristic"))
+            # Packed/obfuscated executable: high entropy in a PE (MZ) file.
+            # Legit signed installers are ALSO packed, so trusted files are
+            # exempted. The signature check is lazy (only once entropy is high).
+            if self.flag_packed_exe and head and head[:2] == b"MZ" and \
+                    shannon_entropy(head) >= PACKED_ENTROPY_THRESHOLD:
+                if not (exact_trusted or self._is_soft_trusted(path)):
+                    out.append(Detection(path, Severity.SUSPICIOUS,
+                                         "packed/high-entropy executable "
+                                         "(possible obfuscated malware)",
+                                         "heuristic", category=Category.VIRUS.value))
+            if exact_trusted:
+                return out          # golden-image file: don't second-guess it
 
+        # Category-aware static detectors (trojan/infector/PUP/fileless/rootkit).
+        if self.static_detectors:
+            out.extend(self._run_static_detectors(
+                path, name, lower, ext, size, head, buf, digest))
         return out
+
+    def _run_static_detectors(self, path, name, lower, ext, size,
+                              head, buf, digest) -> List[Detection]:
+        """Run every enabled category detector over one shared FileContext.
+
+        `is_signed` is memoized per file so several detectors asking about the
+        signature share a single (already globally-cached) Authenticode call,
+        and one misbehaving detector can never abort the scan."""
+        sig_cache: List[bool] = []
+
+        def is_signed() -> bool:
+            if not sig_cache:
+                sig_cache.append(authenticode_valid(path))
+            return sig_cache[0]
+
+        ctx = FileContext(path=path, name=name, lower=lower, ext=ext, size=size,
+                          head=head, buf=buf, digest=digest, is_signed=is_signed)
+        found: List[Detection] = []
+        for det in self.static_detectors:
+            try:
+                found.extend(det.check(ctx))
+            except Exception:
+                pass          # a broken detector must not kill the scan
+        return found
 
     def _is_soft_trusted(self, path: str) -> bool:
         """Legit-but-not-hash-verified: under a trusted directory, or carrying a
         valid Authenticode signature. Used only to suppress the entropy heuristic
         (never a ClamAV/blocklist/YARA hit)."""
         npath = os.path.normcase(os.path.abspath(path))
-        if any(npath.startswith(tp) for tp in self.trusted_paths):
+        if any(npath == tp or npath.startswith(tp + os.sep)
+               for tp in self.trusted_paths):
             return True
         if self.trust_signed and authenticode_valid(path):
             return True

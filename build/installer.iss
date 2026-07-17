@@ -10,7 +10,10 @@
 ;
 ; Produces:  Output\USBVirusScannerSetup.exe  - one file to hand to employees.
 
-#define AppName    "USB Virus Scanner"
+; Display name only — AppId, install dir, exe names and scheduled-task names
+; deliberately keep the USBVirusScanner identity so existing installs upgrade
+; in place and keep their quarantine/logs/config.
+#define AppName    "All-Round Virus Scanner"
 ; Version can be overridden at build time:  iscc /DAppVersion=1.1.0 ...
 #ifndef AppVersion
   #define AppVersion "1.0.0"
@@ -50,6 +53,8 @@ Name: "en"; MessagesFile: "compiler:Default.isl"
 [Tasks]
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Shortcuts:"
 Name: "autowatch";   Description: "Auto-scan every USB drive on insert (recommended)"; GroupDescription: "Protection:"
+Name: "realtime";    Description: "Real-time protection: scan files the moment they land (recommended)"; GroupDescription: "Protection:"
+Name: "feedsync";    Description: "Daily threat-intel feed sync (URLhaus; needs internet)"; GroupDescription: "Protection:"
 #if !ClamBundled
 ; Only offered when the engine was NOT bundled (online build).
 Name: "installclam"; Description: "Download + install ClamAV engine + signatures (needs internet)"; GroupDescription: "Engine:"
@@ -72,6 +77,7 @@ Source: "..\vendor\ClamAV\*"; DestDir: "{commonpf}\ClamAV"; Flags: recursesubdir
 Name: "{commonappdata}\USBVirusScanner\Quarantine"
 Name: "{commonappdata}\USBVirusScanner\Logs"
 Name: "{commonappdata}\USBVirusScanner\Reports"
+Name: "{commonappdata}\USBVirusScanner\Feeds"
 
 [Icons]
 Name: "{group}\{#AppName}";            Filename: "{app}\{#AppExe}"
@@ -89,9 +95,15 @@ Filename: "{cmd}"; Parameters: "/c ""\""{commonpf}\ClamAV\freshclam.exe\"" || ex
 ; Register the auto-scan watcher as a SYSTEM scheduled task at logon.
 Filename: "schtasks"; Parameters: "/Create /F /SC ONLOGON /RL HIGHEST /RU SYSTEM /TN ""USBVirusScannerWatcher"" /TR ""\""{app}\usbscan.exe\"" watch"""; \
   Flags: runhidden waituntilterminated; Tasks: autowatch; StatusMsg: "Enabling auto-scan on USB insert..."
+; Real-time file monitoring as a SYSTEM scheduled task at logon.
+Filename: "schtasks"; Parameters: "/Create /F /SC ONLOGON /RL HIGHEST /RU SYSTEM /TN ""USBVirusScannerMonitor"" /TR ""\""{app}\usbscan.exe\"" monitor"""; \
+  Flags: runhidden waituntilterminated; Tasks: realtime; StatusMsg: "Enabling real-time protection..."
 ; Refresh virus signatures daily so detection tracks new variants.
 Filename: "schtasks"; Parameters: "/Create /F /SC DAILY /ST 12:00 /RL HIGHEST /RU SYSTEM /TN ""USBVirusScannerUpdate"" /TR ""\""{app}\usbscan.exe\"" update"""; \
   Flags: runhidden waituntilterminated; StatusMsg: "Scheduling daily signature updates..."
+; Refresh threat-intel feeds daily (30 min after signatures, spreads the load).
+Filename: "schtasks"; Parameters: "/Create /F /SC DAILY /ST 12:30 /RL HIGHEST /RU SYSTEM /TN ""USBVirusScannerFeeds"" /TR ""\""{app}\usbscan.exe\"" feeds"""; \
+  Flags: runhidden waituntilterminated; Tasks: feedsync; StatusMsg: "Scheduling daily feed sync..."
 ; Offer to launch the GUI at the end.
 Filename: "{app}\{#AppExe}"; Description: "Launch {#AppName} now"; Flags: nowait postinstall skipifsilent
 
@@ -99,9 +111,12 @@ Filename: "{app}\{#AppExe}"; Description: "Launch {#AppName} now"; Flags: nowait
 ; Remove the scheduled tasks on uninstall.
 Filename: "schtasks"; Parameters: "/Delete /F /TN ""USBVirusScannerWatcher"""; Flags: runhidden; RunOnceId: "DelWatchTask"
 Filename: "schtasks"; Parameters: "/Delete /F /TN ""USBVirusScannerUpdate"""; Flags: runhidden; RunOnceId: "DelUpdateTask"
+Filename: "schtasks"; Parameters: "/Delete /F /TN ""USBVirusScannerMonitor"""; Flags: runhidden; RunOnceId: "DelMonitorTask"
+Filename: "schtasks"; Parameters: "/Delete /F /TN ""USBVirusScannerFeeds"""; Flags: runhidden; RunOnceId: "DelFeedsTask"
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{commonappdata}\USBVirusScanner\Logs"
 Type: filesandordirs; Name: "{commonappdata}\USBVirusScanner\Reports"
+Type: filesandordirs; Name: "{commonappdata}\USBVirusScanner\Feeds"
 ; NOTE: Quarantine is intentionally kept on uninstall so quarantined malware
 ; isn't released back onto disk. Remove it manually if desired.

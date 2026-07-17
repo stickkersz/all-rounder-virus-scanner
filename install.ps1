@@ -1,20 +1,25 @@
 <#
-    USB Virus Scanner  -  Windows installer / bootstrap.
+    All-Round Virus Scanner  -  Windows installer / bootstrap (from source).
     Run in an elevated PowerShell:  powershell -ExecutionPolicy Bypass -File install.ps1
 
     - Installs ClamAV (via winget if available) and Python deps.
     - Updates virus signatures (freshclam).
-    - Optionally registers the auto-scan watcher as a startup scheduled task.
+    - Optionally registers scheduled tasks:
+        -RegisterWatcher   auto-scan USB drives on insert
+        -RegisterMonitor   real-time protection (scan files as they land)
+        -RegisterFeeds     daily threat-intel feed sync (URLhaus)
 #>
 
 param(
-    [switch]$RegisterWatcher = $false
+    [switch]$RegisterWatcher = $false,
+    [switch]$RegisterMonitor = $false,
+    [switch]$RegisterFeeds   = $false
 )
 
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 
-Write-Host "== USB Virus Scanner setup ==" -ForegroundColor Cyan
+Write-Host "== All-Round Virus Scanner setup ==" -ForegroundColor Cyan
 
 # --- 1. Python check -------------------------------------------------------
 $py = Get-Command python -ErrorAction SilentlyContinue
@@ -59,25 +64,38 @@ Write-Host "Installing Python dependencies..." -ForegroundColor Yellow
 foreach ($d in @(
     "C:\ProgramData\USBVirusScanner\Quarantine",
     "C:\ProgramData\USBVirusScanner\Logs",
-    "C:\ProgramData\USBVirusScanner\Reports")) {
+    "C:\ProgramData\USBVirusScanner\Reports",
+    "C:\ProgramData\USBVirusScanner\Feeds")) {
     New-Item -ItemType Directory -Force -Path $d | Out-Null
 }
 
-# --- 5. Optional: register auto-scan watcher at startup --------------------
-if ($RegisterWatcher) {
+# --- 5. Optional: scheduled tasks -------------------------------------------
+function Register-ScannerTask([string]$Name, [string]$CliArgs, $Trigger) {
     $action  = New-ScheduledTaskAction -Execute "python" `
-                 -Argument "`"$Root\cli.py`" watch" -WorkingDirectory $Root
-    $trigger = New-ScheduledTaskTrigger -AtLogOn
+                 -Argument "`"$Root\cli.py`" $CliArgs" -WorkingDirectory $Root
     $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -RunLevel Highest
-    Register-ScheduledTask -TaskName "USBVirusScannerWatcher" -Action $action `
-        -Trigger $trigger -Principal $principal -Force
-    Write-Host "Registered startup task 'USBVirusScannerWatcher'." -ForegroundColor Green
+    Register-ScheduledTask -TaskName $Name -Action $action `
+        -Trigger $Trigger -Principal $principal -Force
+    Write-Host "Registered task '$Name'." -ForegroundColor Green
+}
+
+if ($RegisterWatcher) {
+    Register-ScannerTask "USBVirusScannerWatcher" "watch" `
+        (New-ScheduledTaskTrigger -AtLogOn)
+}
+if ($RegisterMonitor) {
+    Register-ScannerTask "USBVirusScannerMonitor" "monitor" `
+        (New-ScheduledTaskTrigger -AtLogOn)
+}
+if ($RegisterFeeds) {
+    Register-ScannerTask "USBVirusScannerFeeds" "feeds" `
+        (New-ScheduledTaskTrigger -Daily -At 12:30)
 }
 
 # --- 6. Desktop shortcut to the GUI (no console window) --------------------
 try {
     $desktop = [Environment]::GetFolderPath("Desktop")
-    $lnk = Join-Path $desktop "USB Virus Scanner.lnk"
+    $lnk = Join-Path $desktop "All-Round Virus Scanner.lnk"
     $ws = New-Object -ComObject WScript.Shell
     $sc = $ws.CreateShortcut($lnk)
     $sc.TargetPath = "pythonw"
@@ -91,5 +109,5 @@ try {
 }
 
 Write-Host "`nDone." -ForegroundColor Green
-Write-Host "  GUI :  double-click 'USB Virus Scanner' on the Desktop  (or: pythonw `"$Root\gui.py`")"
+Write-Host "  GUI :  double-click 'All-Round Virus Scanner' on the Desktop  (or: pythonw `"$Root\gui.py`")"
 Write-Host "  CLI :  python `"$Root\cli.py`" drives"

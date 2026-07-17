@@ -29,9 +29,17 @@ class Detection:
     path: str
     severity: Severity
     threat: str                 # signature name / rule / reason
-    source: str                 # "clamav" | "hash" | "yara" | "heuristic"
+    source: str                 # "clamav" | "hash" | "yara" | "heuristic" | ...
     sha256: Optional[str] = None
     quarantined_to: Optional[str] = None
+    # Malware category this signal points at (virus/worm/trojan/ransomware/...).
+    # Optional + defaulted so every existing Detection call site keeps working;
+    # drives category-aware severity and the coverage report. See
+    # scanner/detectors for the taxonomy.
+    category: Optional[str] = None
+    # Optional numeric weight of this single signal (behavioral detectors
+    # accumulate these). None for plain pass/fail signals.
+    score: Optional[float] = None
 
     def to_dict(self) -> dict:
         return {
@@ -41,6 +49,8 @@ class Detection:
             "source": self.source,
             "sha256": self.sha256,
             "quarantined_to": self.quarantined_to,
+            "category": self.category,
+            "score": self.score,
         }
 
 
@@ -65,6 +75,17 @@ class ScanResult:
     @property
     def clean(self) -> bool:
         return not self.infected and not self.suspicious
+
+    def merge(self, other: "ScanResult") -> None:
+        """Accumulate another result into this one (multi-root scans).
+
+        Lives here so every accumulated field is defined in ONE place: a
+        caller merging field-by-field silently drops any field added later.
+        """
+        self.files_scanned += other.files_scanned
+        self.files_skipped += other.files_skipped
+        self.detections.extend(other.detections)
+        self.errors.extend(other.errors)
 
     def to_dict(self) -> dict:
         return {

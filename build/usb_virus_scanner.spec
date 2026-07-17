@@ -26,6 +26,13 @@ hidden = [
     "yara",
     "yaml",
     "rich",
+    # watchdog picks its platform observer dynamically — PyInstaller's static
+    # analysis misses the Windows backend, so name it explicitly.
+    "watchdog",
+    "watchdog.observers",
+    "watchdog.observers.read_directory_changes",
+    "watchdog.observers.winapi",
+    "watchdog.observers.polling",
 ]
 
 gui_a = Analysis(

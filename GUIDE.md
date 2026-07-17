@@ -1,4 +1,9 @@
-# USB Virus Scanner — Installation & User Guide
+# All-Round Virus Scanner — Installation & User Guide
+
+> *Formerly "USB Virus Scanner". It now protects the whole computer — USB
+> drives, hard disks, downloads, and files in real time. The setup file and
+> install folders keep the old `USBVirusScanner` names on purpose, so upgrades
+> keep your settings and quarantine.*
 
 A friendly, step-by-step guide. No prior experience needed. Two parts:
 
@@ -23,8 +28,10 @@ You only need the single file **`USBVirusScannerSetup.exe`** (your IT team gives
 4. On the options screen, tick the boxes you want (defaults are fine):
    - ☑ **Create a desktop shortcut**
    - ☑ **Auto-scan every USB drive on insert** (recommended)
+   - ☑ **Real-time protection** — scans files the moment they land (recommended)
+   - ☑ **Daily threat-intel feed sync** — needs internet; skip on offline PCs
 5. Click **Install**, wait a few seconds, then **Finish**.
-6. Done. You'll see a **USB Virus Scanner** icon on your desktop.
+6. Done. You'll see an **All-Round Virus Scanner** icon on your desktop.
 
 That's it — the scanner, the virus engine, and the virus database are all installed from that one file. **[Jump to the Tutorial →](#part-2--tutorial-using-the-program)**
 
@@ -99,7 +106,7 @@ USBVirusScannerSetup.exe /VERYSILENT /NORESTART
 
 ### 1. Scan a USB stick (the window / GUI)
 
-1. Open **USB Virus Scanner** (desktop icon, or Start menu).
+1. Open **All-Round Virus Scanner** (desktop icon, or Start menu).
 2. Plug in the USB stick you want to check.
 3. In the **Target** box, pick your USB drive from the dropdown
    (e.g. `E:\`). Click **Refresh** if it isn't listed yet.
@@ -113,6 +120,23 @@ USBVirusScannerSetup.exe /VERYSILENT /NORESTART
    - **orange rows** = suspicious (worth a look)
 
 > **Just want to check without changing anything?** Tick **"Report only"** before scanning — it finds threats but never moves or deletes files.
+
+### 1b. Scan the whole computer (Quick / Full)
+
+Two buttons next to **▶ Scan**:
+
+- **Quick Scan** — checks the places malware actually lands: Downloads,
+  Desktop, temporary folders, and the auto-start locations. Takes minutes.
+  **Do this if you just want a fast check-up.**
+- **Full Scan** — every drive in the computer, every file. Can take **hours**
+  on a big disk, so the program asks you to confirm first.
+
+From the command line: `usbscan scan --profile quick` or
+`usbscan scan --profile full`.
+
+> **IT tip:** big folders you never want scanned (VM images, build caches) go
+> in `config.yaml` under `scanner.exclusions`. Never exclude Downloads, Temp
+> or AppData — that's exactly where malware lands.
 
 ### 2. What happens to infected files (quarantine)
 
@@ -145,6 +169,20 @@ to do anything: **every USB drive is scanned the moment it's plugged in**, in
 the background. If something bad is found, it's quarantined and logged
 automatically.
 
+### 3b. Real-time protection (files scanned as they arrive)
+
+Tick **"Real-time protection"** in the window, and every new or changed file
+in your Downloads, Desktop and temp folders is scanned **the moment it
+finishes arriving** — before you open it. Threats are quarantined instantly
+and appear in the results table.
+
+- IT can turn this on for everyone at install time (the "Real-time
+  protection" checkbox) — it then runs in the background on every logon, no
+  window needed.
+- It also checks **where a downloaded file came from**: if the download URL is
+  on a known malware list (updated by the daily feed sync), the file is
+  flagged even before the virus database knows the file itself.
+
 ### 4. Using the command line (IT / power users)
 
 Open **PowerShell** in the install folder (`C:\Program Files\USBVirusScanner`)
@@ -155,12 +193,18 @@ usbscan drives                 # list plugged-in removable drives
 usbscan scan E:\               # scan drive E: now (quarantines threats)
 usbscan scan E:\ --no-quarantine   # report only, change nothing
 usbscan watch                  # keep running; auto-scan every USB on insert
+usbscan monitor                # keep running; real-time scan of new files
+usbscan scan --profile quick   # fast scan of common malware locations
+usbscan scan --profile full    # every drive (long!)
+usbscan feeds                  # refresh the malicious-URL list (URLhaus)
 usbscan quarantine             # list quarantined files
 usbscan quarantine --restore <ID> --to D:\recovered.bin   # restore one
 usbscan update                 # refresh the virus signatures
 ```
 
-The exit code is **0 = clean**, **1 = threats found** — handy for scripts.
+The exit code is **0 = clean**, **1 = threats found**, **2 = bad arguments**,
+**3 = finished with errors** (something couldn't be read — don't treat as
+clean). Handy for scripts.
 
 *(From source, replace `usbscan` with `python cli.py`.)*
 
@@ -174,13 +218,14 @@ usbscan update
 
 IT can schedule this (e.g. a daily task) so every PC stays current.
 
-### 5b. Two kinds of "update" — don't mix them up
+### 5b. Three kinds of "update" — don't mix them up
 
 This trips people up, so here it is plainly:
 
 | If you want... | Do this | Rebuild needed? |
 |----------------|---------|:---:|
 | **Newer virus definitions** (catch the latest malware) | `usbscan update` | No |
+| **Newer malicious-URL lists** (for the download-origin check) | `usbscan feeds` | No |
 | **New program features** (e.g. the new Delete button, a bug fix) | build a new `setup.exe` and reinstall it | **Yes** |
 
 **Plain-English rule:**

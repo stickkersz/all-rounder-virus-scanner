@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""USB Virus Scanner - desktop GUI (modern, smooth, real-time).
+"""All-Round Virus Scanner - desktop GUI (modern, smooth, real-time).
 
 Tkinter/ttk (ships with Python on every Windows) so there is nothing extra to
 install for the front-end. Scanning runs on a worker thread; progress events are
@@ -21,9 +21,11 @@ from tkinter import filedialog, messagebox, ttk
 from scanner.config import Config
 from scanner.engine import ScanEngine
 from scanner.paths import app_base_dir
+from scanner.profiles import FULL, QUICK, resolve_targets
 from scanner.quarantine import Quarantine
+from scanner.realtime import RealtimeMonitor
 from scanner.reporter import log_result, setup_logging, write_report
-from scanner.watcher import list_removable
+from scanner.drives import FIXED, REMOVABLE, list_drives
 
 BASE_DIR = app_base_dir()
 
@@ -48,7 +50,7 @@ def _truncate_middle(text: str, width: int = 72) -> str:
 class ScannerGUI(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("USB Virus Scanner")
+        self.title("All-Round Virus Scanner")
         self.geometry("880x620")
         self.minsize(760, 540)
         self.configure(bg=COL["bg"])
@@ -61,10 +63,17 @@ class ScannerGUI(tk.Tk):
         self._scanning = False
         self._pending_progress = None      # coalesced: only the latest is drawn
         self._bar_mode = None
+        self._monitor = None               # RealtimeMonitor when toggled on
+        self._scan_thread = None           # in-flight manual scan worker
 
         self._init_style()
         self._build_ui()
         self._refresh_drives()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        # realtime.enabled: true in config means protection starts with the
+        # app — otherwise the config switch would be a knob that does nothing.
+        if self.monitor_var.get():
+            self._toggle_monitor()
         self.after(80, self._drain_events)
 
     # ------------------------------------------------------------------ style
@@ -115,7 +124,7 @@ class ScannerGUI(tk.Tk):
         root = ttk.Frame(self, padding=14)
         root.pack(fill="both", expand=True)
 
-        ttk.Label(root, text="🛡  USB Virus Scanner", style="Title.TLabel")\
+        ttk.Label(root, text="🛡  All-Round Virus Scanner", style="Title.TLabel")\
             .pack(anchor="w", pady=(0, 10))
 
         # --- controls card ---
@@ -139,12 +148,28 @@ class ScannerGUI(tk.Tk):
         row2.pack(fill="x", pady=(12, 0))
         self.report_only = tk.BooleanVar(value=False)
         ttk.Checkbutton(row2, text="Report only (don't move files)",
-                        variable=self.report_only).pack(side="left")
+                        variable=self.report_only,
+                        command=self._sync_report_only).pack(side="left")
+        self.monitor_var = tk.BooleanVar(
+            value=bool(self.cfg["realtime"].get("enabled", False)))
+        ttk.Checkbutton(row2, text="Real-time protection",
+                        variable=self.monitor_var,
+                        command=self._toggle_monitor).pack(side="left",
+                                                           padx=(14, 0))
         self.scan_btn = ttk.Button(row2, text="▶  Scan", style="Accent.TButton",
                                    command=self._start_scan)
         self.scan_btn.pack(side="right")
+        self.full_btn = ttk.Button(row2, text="Full Scan",
+                                   command=lambda: self._start_profile(FULL))
+        self.full_btn.pack(side="right", padx=(0, 8))
+        self.quick_btn = ttk.Button(row2, text="Quick Scan",
+                                    command=lambda: self._start_profile(QUICK))
+        self.quick_btn.pack(side="right", padx=(0, 8))
         ttk.Button(row2, text="Quarantine…", command=self._open_quarantine)\
             .pack(side="right", padx=(0, 8))
+        # Defined where the buttons are built: a new scan button added here
+        # must join this tuple, or it stays clickable mid-scan.
+        self.scan_buttons = (self.scan_btn, self.quick_btn, self.full_btn)
 
         # --- progress card ---
         prog = self._card(root)
@@ -197,13 +222,21 @@ class ScannerGUI(tk.Tk):
 
     # -------------------------------------------------------------- actions
     def _refresh_drives(self) -> None:
-        drives = list_removable()
-        self.drive_box["values"] = drives
-        if drives and not self.target_var.get():
-            self.target_var.set(drives[0])
-        n = len(drives)
-        self.status_var.set(f"{n} removable drive(s) detected." if n else
-                            "No removable drive detected - plug in a USB or Browse.")
+        # Every scannable disk, not just removable — removable first so the USB
+        # flow still puts a stick at the top of the list.
+        found = sorted(list_drives((REMOVABLE, FIXED)),
+                       key=lambda d: (d.kind != REMOVABLE, d.root))
+        self.drive_box["values"] = [d.root for d in found]
+        # Auto-fill ONLY a removable drive. Pre-selecting C:\ when no USB is
+        # attached would turn a habitual "click Scan" into an hours-long
+        # system-disk walk with quarantine on; fixed disks must be a
+        # deliberate pick from the dropdown.
+        if (found and not self.target_var.get()
+                and found[0].kind == REMOVABLE):
+            self.target_var.set(found[0].root)
+        n = len(found)
+        self.status_var.set(f"{n} drive(s) detected." if n else
+                            "No drive detected - plug in a USB or Browse.")
 
     def _browse(self) -> None:
         path = filedialog.askdirectory(title="Choose a drive or folder to scan")
@@ -211,15 +244,61 @@ class ScannerGUI(tk.Tk):
             self.target_var.set(path)
 
     def _start_scan(self) -> None:
-        if self._scanning:
-            return
         target = self.target_var.get().strip()
         if not target or not os.path.exists(target):
-            messagebox.showwarning("USB Virus Scanner",
+            messagebox.showwarning("All-Round Virus Scanner",
                                    "Pick a valid drive or folder first.")
             return
+        # A path the user picked themselves -> explicit (overrides an
+        # exclusion blanketing it, like the CLI's positional-path behavior).
+        self._launch(lambda q: self.engine.scan(
+            target, progress=self._progress_cb, quarantine=q, explicit=True))
+
+    def _start_profile(self, profile: str) -> None:
+        try:
+            targets = resolve_targets(
+                profile,
+                include_network=self.cfg["scanner"].get("scan_network_drives",
+                                                        False))
+        except ValueError as exc:
+            messagebox.showerror("All-Round Virus Scanner", str(exc))
+            return
+        if not targets:
+            messagebox.showwarning("All-Round Virus Scanner",
+                                   "No scan targets found for this profile.")
+            return
+        if profile == FULL and not messagebox.askyesno(
+                "Full scan",
+                "Scan every drive on this computer?\n\n"
+                f"Targets: {', '.join(targets)}\n\n"
+                "This can take hours on a large disk."):
+            return
+        # Profile-resolved roots are machine-generated -> exclusions apply
+        # fully (explicit=False), matching the CLI.
+        self._launch(lambda q: self.engine.scan_many(
+            targets, progress=self._progress_cb, quarantine=q,
+            explicit=False))
+
+    def _progress_cb(self, ev) -> None:
+        self._events.put(("progress", ev))
+
+    def _insert_detections(self, detections) -> None:
+        """The results-table column contract, in one place: manual and
+        real-time rows must always agree on column order."""
+        for d in detections:
+            self.tree.insert("", "end",
+                             values=(d.severity.value, d.threat, d.source,
+                                     d.path),
+                             tags=(d.severity.value,))
+
+    def _launch(self, scan_fn) -> None:
+        """Common scan startup: lock the UI, then run `scan_fn(quarantine)`
+        on a worker thread through the shared log/report/done pipeline."""
+        if self._scanning:
+            return
         self._scanning = True
-        self.scan_btn.config(state="disabled")
+        for b in self.scan_buttons:
+            b.config(state="disabled")
         self.tree.delete(*self.tree.get_children())
         self.banner.pack_forget()
         self._pending_progress = None
@@ -229,21 +308,82 @@ class ScannerGUI(tk.Tk):
         self.file_var.set("")
 
         do_quarantine = not self.report_only.get()   # read Tk var on main thread
-        threading.Thread(target=self._scan_worker,
-                         args=(target, do_quarantine), daemon=True).start()
+        # Keep the handle: a worker still holding a reference to this window
+        # can end up running the GC that finalizes Tk widgets, and finalizing
+        # them off the main thread aborts Tcl. Shutdown joins it.
+        self._scan_thread = threading.Thread(
+            target=self._scan_worker, args=(scan_fn, do_quarantine), daemon=True)
+        self._scan_thread.start()
 
-    def _scan_worker(self, target: str, do_quarantine: bool) -> None:
+    def _scan_worker(self, scan_fn, do_quarantine: bool) -> None:
         try:
-            result = self.engine.scan(
-                target,
-                progress=lambda ev: self._events.put(("progress", ev)),
-                quarantine=do_quarantine,
-            )
+            result = scan_fn(do_quarantine)
             log_result(self.logger, result)
             report = write_report(self.cfg["reporting"], result)
             self._events.put(("done", result, report))
         except Exception as exc:  # surface, don't crash the UI thread
             self._events.put(("error", str(exc)))
+
+    # -------------------------------------------------- real-time protection
+    def _sync_report_only(self) -> None:
+        """Keep a running monitor in step with the Report-only checkbox.
+
+        "Report only (don't move files)" is the ONE visible move-nothing
+        control; a real-time hit must honor it too, or the app quarantines a
+        file the user was promised it would leave alone.
+        """
+        if self._monitor:
+            self._monitor.quarantine = self._realtime_quarantine()
+
+    def _realtime_quarantine(self) -> bool:
+        return (not self.report_only.get()) and \
+            self.cfg["realtime"].get("quarantine", True)
+
+    def _toggle_monitor(self) -> None:
+        if self.monitor_var.get():
+            # from_config derives watch roots + the ignore list (our own
+            # quarantine/log/report/feeds dirs) so the GUI and CLI can't drift.
+            self._monitor = RealtimeMonitor.from_config(
+                self.engine, self.cfg,
+                on_result=lambda r: self._events.put(("rt", r)),
+                quarantine=self._realtime_quarantine())
+            try:
+                self._monitor.start()
+            except RuntimeError as exc:
+                self._monitor = None
+                self.monitor_var.set(False)
+                messagebox.showerror("Real-time protection", str(exc))
+                return
+            warning = self._monitor.clamd_warning()
+            if warning:
+                messagebox.showwarning("Real-time protection", warning)
+            self.status_var.set(
+                f"Real-time protection ON — watching "
+                f"{len(self._monitor.roots)} folder(s).")
+        elif self._monitor:
+            self._monitor.stop()          # stop() drains + flushes the cache
+            self._monitor = None
+            self.status_var.set("Real-time protection off.")
+
+    def _on_rt_result(self, result) -> None:
+        """A real-time batch finished: same log/report/table path as manual
+        scans (spec: one notification path, one quarantine, one log)."""
+        log_result(self.logger, result)
+        self._insert_detections(result.detections)
+        if result.detections:
+            write_report(self.cfg["reporting"], result)
+        if result.infected:
+            self.banner.config(
+                text=(f"⚠  Real-time: {len(result.infected)} infected "
+                      f"file(s) quarantined."),
+                bg=COL["infected"])
+            self.banner.pack(fill="x", pady=(0, 8), before=self.tree.master)
+
+    def _on_close(self) -> None:
+        if self._monitor:
+            self._monitor.stop()          # drains + flushes the cache
+            self._monitor = None
+        self.destroy()
 
     # ---------------------------------------------------- event pump (UI thread)
     def _drain_events(self) -> None:
@@ -258,6 +398,8 @@ class ScannerGUI(tk.Tk):
                 elif kind == "done":
                     self._pending_progress = None
                     self._on_done(evt[1], evt[2])
+                elif kind == "rt":
+                    self._on_rt_result(evt[1])
                 elif kind == "error":
                     self._pending_progress = None
                     self._finish()
@@ -297,10 +439,7 @@ class ScannerGUI(tk.Tk):
 
     def _on_done(self, result, report: str) -> None:
         self._finish()
-        for d in result.detections:
-            self.tree.insert("", "end",
-                             values=(d.severity.value, d.threat, d.source, d.path),
-                             tags=(d.severity.value,))
+        self._insert_detections(result.detections)
         clean = result.clean
         report_only = self.report_only.get()
         if clean:
@@ -324,7 +463,8 @@ class ScannerGUI(tk.Tk):
         self._scanning = False
         self._set_indeterminate(False)
         self.progress.config(value=self.progress["maximum"])
-        self.scan_btn.config(state="normal")
+        for b in self.scan_buttons:
+            b.config(state="normal")
         self.phase_var.set("Done.")
 
     # -------------------------------------------------------- quarantine window

@@ -1,57 +1,24 @@
 """Removable-media watcher.
 
 Detects newly inserted USB drives and fires a callback so they can be scanned
-automatically. Primary strategy is drive-letter polling via the Win32 API
-(reliable on every Windows version, no WMI/admin needed). Falls back to mount
-point polling on Linux/macOS so the tool is testable off Windows.
+automatically. Drive enumeration itself lives in `scanner.drives` — this module
+only handles the polling/arrival logic on top of it.
 """
 
 from __future__ import annotations
 
-import ctypes
+import logging
 import os
-import sys
 import time
-from typing import Callable, List, Set
+from typing import Callable, Set
 
-DRIVE_REMOVABLE = 2
-DRIVE_FIXED = 3
+from .drives import list_removable
 
+__all__ = ["DriveWatcher", "list_removable"]
 
-def _windows_removable_drives(include_fixed: bool = False) -> List[str]:
-    """Return list of removable (and optionally fixed) drive roots like 'E:\\'."""
-    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
-    bitmask = kernel32.GetLogicalDrives()
-    roots: List[str] = []
-    for i in range(26):
-        if not (bitmask >> i) & 1:
-            continue
-        root = f"{chr(ord('A') + i)}:\\"
-        dtype = kernel32.GetDriveTypeW(ctypes.c_wchar_p(root))
-        if dtype == DRIVE_REMOVABLE or (include_fixed and dtype == DRIVE_FIXED):
-            roots.append(root)
-    return roots
-
-
-def _posix_mounts() -> List[str]:
-    """Removable-ish mount points on macOS (/Volumes) and Linux (/media,/mnt,/run/media)."""
-    roots: List[str] = []
-    candidates = ["/Volumes"]
-    user = os.environ.get("USER", "")
-    candidates += ["/media", "/mnt", f"/media/{user}", f"/run/media/{user}"]
-    for base in candidates:
-        if os.path.isdir(base):
-            for name in os.listdir(base):
-                p = os.path.join(base, name)
-                if os.path.ismount(p) or os.path.isdir(p):
-                    roots.append(p)
-    return roots
-
-
-def list_removable(include_fixed: bool = False) -> List[str]:
-    if sys.platform == "win32":
-        return _windows_removable_drives(include_fixed)
-    return _posix_mounts()
+# Not sys.stderr: it is None under pythonw / a PyInstaller windowed build, so
+# writing to it inside the keep-alive handler would kill the watcher loop.
+log = logging.getLogger("usbscanner")
 
 
 class DriveWatcher:
@@ -67,7 +34,7 @@ class DriveWatcher:
             try:
                 self._tick()
             except Exception as exc:  # keep the watcher alive no matter what
-                sys.stderr.write(f"[watcher] error: {exc}\n")
+                log.error("[watcher] error: %s", exc)
             time.sleep(self.poll_interval)
 
     def _tick(self) -> None:

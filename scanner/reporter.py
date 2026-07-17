@@ -50,16 +50,32 @@ def log_result(logger: logging.Logger, result: ScanResult) -> None:
             fh.write(json.dumps(result.to_dict()) + "\n")
 
 
+def _unique_path(out_dir: str, stem: str) -> str:
+    """A report path that never overwrites an existing one.
+
+    Real-time batches all share the target name "<N> changed file(s)" and can
+    finish twice inside the same second (the worker polls sub-second), so a
+    timestamp alone collides and the second report would silently replace the
+    first — losing the audit record of a quarantined threat.
+    """
+    path = os.path.join(out_dir, f"{stem}.txt")
+    n = 2
+    while os.path.exists(path):
+        path = os.path.join(out_dir, f"{stem}_{n}.txt")
+        n += 1
+    return path
+
+
 def write_report(cfg: dict, result: ScanResult) -> str:
     out_dir = cfg.get("path", "reports")
     os.makedirs(out_dir, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     safe_target = "".join(c if c.isalnum() else "_" for c in result.target)[-40:]
-    path = os.path.join(out_dir, f"scan_{stamp}_{safe_target}.txt")
+    path = _unique_path(out_dir, f"scan_{stamp}_{safe_target}")
 
     lines = [
         "=" * 64,
-        " USB VIRUS SCANNER — SCAN REPORT",
+        " ALL-ROUND VIRUS SCANNER — SCAN REPORT",
         "=" * 64,
         f" Target        : {result.target}",
         f" Started       : {result.started}",
@@ -76,7 +92,9 @@ def write_report(cfg: dict, result: ScanResult) -> str:
         lines.append("DETECTIONS")
         lines.append("-" * 64)
         for d in result.detections:
-            lines.append(f"[{d.severity.value.upper():10}] {d.threat}  ({d.source})")
+            cat = f"/{d.category}" if d.category else ""
+            lines.append(f"[{d.severity.value.upper():10}] {d.threat}  "
+                         f"({d.source}{cat})")
             lines.append(f"    file : {d.path}")
             if d.sha256:
                 lines.append(f"    sha256: {d.sha256}")

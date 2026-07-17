@@ -1,4 +1,4 @@
-# USB Virus Scanner — company configuration
+# All-Round Virus Scanner — company configuration
 # Edit paths to match your deployment. All paths support Windows (C:\...) and POSIX.
 
 scanner:
@@ -17,8 +17,13 @@ scanner:
   # Turning this OFF is a big speed win on slow laptops (skips unpacking).
   scan_archives: true
   # Worker threads for the heuristic layer. "auto" = scale to CPU cores
-  # (kept modest so single-disk laptops don't thrash). Or set an integer.
+  # (kept modest so single-disk laptops don't thrash), then clamp by free RAM
+  # so a low-end machine can't fan out into an out-of-memory Full scan. Or set
+  # an integer to override.
   workers: auto
+  # Run scans at below-normal process priority so a Full scan keeps a weak PC
+  # usable instead of pinning every core. Set false on a dedicated scan box.
+  background_priority: true
   # Skip files already scanned clean and unchanged since last scan.
   # Massive speed-up when re-scanning the same USB / company hard disk.
   use_cache: true
@@ -28,6 +33,22 @@ scanner:
   detect_pua: true
   # Enable ClamAV's own heuristics (packed/broken PE, macros) for zero-days.
   heuristic_alerts: true
+  # Include mapped network drives in a --profile full scan. Off by default:
+  # walking a share is slow and scans another machine's files.
+  scan_network_drives: false
+  # Paths NEVER scanned, by any layer. Empty by default — an exclusion is a
+  # hole in coverage, so it is opt-in. Use it for big media/dev trees that
+  # make Full scans take hours (the spec's stated purpose).
+  #   Absolute path -> that folder and everything under it
+  #   Wildcard      -> matches full path or bare filename ("*" spans folders)
+  #   Bare name     -> any file/folder with that name, at any depth
+  # WARNING: never exclude user-writable drop targets — Downloads, Temp,
+  # AppData — those are exactly where malware lands.
+  exclusions: []
+  #  - "D:\\VMs"                  # multi-GB virtual disk images
+  #  - "node_modules"             # dev dependency trees, any depth
+  #  - "*.iso"                    # disk images
+  #  - "C:\\Users\\*\\AppData\\Local\\Google\\Chrome\\User Data\\*\\Cache"
 
 heuristics:
   enabled: true
@@ -99,3 +120,38 @@ watcher:
   auto_scan_on_insert: true
   # Poll interval (seconds) for the fallback drive-letter watcher.
   poll_interval: 3
+
+web:
+  # Check where risky downloaded files CAME FROM (Windows Mark-of-the-Web URL)
+  # against synced threat-intel feeds. Catches fresh malware whose payload has
+  # no signature yet but whose distribution URL is already known-bad.
+  # Origin match flags SUSPICIOUS only — origin alone never auto-quarantines
+  # (a renamed/re-served file from a bad URL may itself be clean).
+  check_download_origin: true
+  # Where synced feeds are stored (must be writable by the sync task).
+  feeds_dir: "C:\\ProgramData\\USBVirusScanner\\Feeds"
+  # Sync with:  usbscan feeds
+  # URLhaus by abuse.ch — free for any use, no API key needed.
+  feeds:
+    - name: urlhaus
+      url: "https://urlhaus.abuse.ch/downloads/text_online/"
+      type: urls
+  # Optional: Google Safe Browsing Lookup API. Register your own API key at
+  # console.cloud.google.com (it is NOT bundled). Empty = disabled.
+  # PRIVACY: when enabled, download-origin URLs are sent to Google.
+  safe_browsing_api_key: ""
+
+realtime:
+  # Real-time monitoring (usbscan monitor): scan files the moment they land.
+  # Opt-in. Needs the 'watchdog' package (bundled in the installer build).
+  enabled: false
+  # Directories to watch. Empty = the Quick profile locations (Downloads,
+  # Desktop, Temp, AppData, Startup folders) — where new files actually land.
+  # Watching whole drives works but costs more; prefer targeted roots.
+  paths: []
+  #  - "C:\\Users\\Public"
+  # Scan a file once it has gone this many seconds without a new write event
+  # (a growing download is scanned once at the end, not per chunk).
+  settle_seconds: 2.0
+  # Quarantine real-time hits automatically. false = report/log only.
+  quarantine: true

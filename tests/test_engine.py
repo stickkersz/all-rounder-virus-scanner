@@ -11,9 +11,10 @@ def _engine(config, tmp_path):
 
 
 def test_auto_workers():
-    assert _auto_workers(4) == 4
-    assert 2 <= _auto_workers("auto") <= 8
-    assert 2 <= _auto_workers(0) <= 8      # invalid -> auto
+    cap = 64 * 1024 * 1024
+    assert _auto_workers(4, cap) == 4               # explicit override wins
+    assert 1 <= _auto_workers("auto", cap) <= 8     # auto: RAM-clamped 1..8
+    assert 1 <= _auto_workers(0, cap) <= 8          # invalid -> auto
 
 
 def test_scan_detects_threats(config, fake_usb, tmp_path):
@@ -135,3 +136,133 @@ def test_cache_path_normalized_match(config, fake_usb, tmp_path, monkeypatch):
     from scanner.engine import _norm
     flagged = {_norm(d.path) for d in res.detections}
     assert _norm(str(target)) in flagged
+
+
+# ---- exclusions ---------------------------------------------------------
+def _cfg_with_exclusions(config, patterns):
+    config.data["scanner"]["exclusions"] = patterns
+    return config
+
+
+def test_no_exclusions_by_default(config, fake_usb, tmp_path):
+    """Nothing is excluded unless the user opts in — coverage is the default."""
+    eng = _engine(config, tmp_path)
+    assert not eng.exclusions.active
+    res = eng.scan(str(fake_usb["dir"]), quarantine=False)
+    assert len(res.infected) >= 2
+
+
+def test_excluded_dir_is_not_scanned(config, fake_usb, tmp_path):
+    """A directory exclusion hides the malware inside it (the coverage hole the
+    config warns about) — proves pruning actually takes effect."""
+    vms = fake_usb["dir"] / "VMs"
+    vms.mkdir()
+    (vms / "mal.bin").write_bytes(b"known-bad-payload-bytes")   # blocklisted hash
+    eng = _engine(_cfg_with_exclusions(config, [str(vms)]), tmp_path)
+    res = eng.scan(str(fake_usb["dir"]), quarantine=False)
+    hit_paths = {os.path.normcase(d.path) for d in res.detections}
+    assert os.path.normcase(str(vms / "mal.bin")) not in hit_paths
+    # the identical payload OUTSIDE the excluded dir is still caught
+    assert os.path.normcase(str(fake_usb["dir"] / "mal.bin")) in hit_paths
+
+
+def test_excluded_file_glob_is_not_scanned(config, fake_usb, tmp_path):
+    (fake_usb["dir"] / "disk.iso").write_bytes(b"known-bad-payload-bytes")
+    eng = _engine(_cfg_with_exclusions(config, ["*.iso"]), tmp_path)
+    res = eng.scan(str(fake_usb["dir"]), quarantine=False)
+    assert not any(d.path.endswith(".iso") for d in res.detections)
+
+
+def test_target_root_scanned_even_if_excluded(config, fake_usb, tmp_path):
+    """Explicitly asking to scan a path beats an exclusion matching it —
+    otherwise the scan silently does nothing."""
+    eng = _engine(_cfg_with_exclusions(config, [str(fake_usb["dir"])]), tmp_path)
+    res = eng.scan(str(fake_usb["dir"]), quarantine=False)
+    assert len(res.infected) >= 1
+
+
+def test_excluded_dir_counts_as_skipped(config, fake_usb, tmp_path):
+    sub = fake_usb["dir"] / "cache"
+    sub.mkdir()
+    (sub / "a.txt").write_text("x")
+    eng = _engine(_cfg_with_exclusions(config, ["cache"]), tmp_path)
+    res = eng.scan(str(fake_usb["dir"]), quarantine=False)
+    assert res.files_skipped >= 1
+
+
+# ---- scan_many (scan profiles) ------------------------------------------
+def test_scan_many_merges_results(config, fake_usb, tmp_path):
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "mal2.bin").write_bytes(b"known-bad-payload-bytes")
+    eng = _engine(config, tmp_path)
+    res = eng.scan_many([str(fake_usb["dir"]), str(other)], quarantine=False)
+    paths = {os.path.basename(d.path) for d in res.detections}
+    assert "mal.bin" in paths and "mal2.bin" in paths
+    assert res.files_scanned >= 2
+    assert res.finished and str(other) in res.target
+
+
+def test_scan_many_one_bad_root_does_not_abort_rest(config, fake_usb, tmp_path):
+    eng = _engine(config, tmp_path)
+    res = eng.scan_many([str(tmp_path / "does-not-exist"), str(fake_usb["dir"])],
+                        quarantine=False)
+    assert any("does not exist" in e.lower() for e in res.errors)
+    assert len(res.infected) >= 1          # the good root still scanned
+
+
+def test_scan_many_empty_targets(config, tmp_path):
+    eng = _engine(config, tmp_path)
+    res = eng.scan_many([], quarantine=False)
+    assert res.clean and res.files_scanned == 0
+
+
+# ---- explicit vs machine-generated roots (review findings) ---------------
+def test_non_explicit_scan_honors_root_exclusion(config, fake_usb, tmp_path):
+    """Watcher/profile-derived root that the admin excluded: honored, and
+    recorded in errors (visible partial coverage), never silently walked."""
+    eng = _engine(_cfg_with_exclusions(config, [str(fake_usb["dir"])]), tmp_path)
+    res = eng.scan(str(fake_usb["dir"]), quarantine=False, explicit=False)
+    assert res.files_scanned == 0
+    assert any("excluded by config" in e.lower() for e in res.errors)
+
+
+def test_explicit_scan_overrides_root_exclusion(config, fake_usb, tmp_path):
+    eng = _engine(_cfg_with_exclusions(config, [str(fake_usb["dir"])]), tmp_path)
+    res = eng.scan(str(fake_usb["dir"]), quarantine=False, explicit=True)
+    assert len(res.infected) >= 1
+
+
+def test_explicit_root_name_rule_keeps_nested_pruning(config, tmp_path):
+    """scan .../node_modules explicitly: nested node_modules still pruned."""
+    root = tmp_path / "proj" / "node_modules"
+    nested = root / "pkg" / "node_modules"
+    nested.mkdir(parents=True)
+    (root / "mal.bin").write_bytes(b"known-bad-payload-bytes")
+    (nested / "mal.bin").write_bytes(b"known-bad-payload-bytes")
+    eng = _engine(_cfg_with_exclusions(config, ["node_modules"]), tmp_path)
+    res = eng.scan(str(root), quarantine=False)
+    paths = {os.path.normcase(d.path) for d in res.detections}
+    assert os.path.normcase(str(root / "mal.bin")) in paths
+    assert os.path.normcase(str(nested / "mal.bin")) not in paths
+
+
+def test_clamav_absence_is_not_a_scan_error(config, fake_usb, tmp_path):
+    """No ClamAV installed is a supported mode; it must not push the exit
+    code to 'completed with errors'."""
+    eng = _engine(config, tmp_path)
+    eng.clam.clamscan = None
+    eng.clam.clamdscan = None
+    res = eng.scan(str(fake_usb["dir"]), quarantine=False)
+    assert not any("clamav" in e.lower() for e in res.errors)
+
+
+def test_scan_many_saves_cache_once(config, fake_usb, tmp_path, monkeypatch):
+    other = tmp_path / "o"
+    other.mkdir()
+    (other / "a.txt").write_text("x")
+    eng = _engine(config, tmp_path)
+    calls = []
+    monkeypatch.setattr(eng.cache, "save", lambda: calls.append(1))
+    eng.scan_many([str(fake_usb["dir"]), str(other)], quarantine=False)
+    assert len(calls) == 1
